@@ -186,7 +186,7 @@ int add_app_feature(int appid, char *name, char *feature)
 		begin = p + 1;
 	}
 	if (AF_DICT_PARAM_INDEX != param_num && strlen(feature) > MIN_FEATURE_STR_LEN) {
-		AF_ERROR("22 invalid feature:%s\n", feature);
+		AF_ERROR("invalid feature:%s\n", feature);
 		return -1;
 	}
 	strncpy(dict, begin, p - begin);
@@ -281,7 +281,7 @@ void load_feature_buf_from_file(char **config_buf)
 
 	inode = fp->f_inode;
 	size = inode->i_size;
-	AF_INFO("feature file size: %u\n", size);
+	AF_DEBUG("feature file size: %u\n", size);
 	if (size == 0) {
 		AF_WARN("warning, file size = %u\n", size);
 		return;
@@ -305,14 +305,14 @@ void load_feature_buf_from_file(char **config_buf)
 	return size;
 }
 
-void load_feature_config(void)
+int load_feature_config(void)
 {
 	AF_INFO("begin load feature config.....\n");
 	char *feature_buf = NULL;
 	load_feature_buf_from_file(&feature_buf);
 	if (!feature_buf) {
 		AF_ERROR("error, feature buf is null\n");
-		return;
+		return -1;
 	}
 	
 	char *p;
@@ -333,7 +333,7 @@ void load_feature_config(void)
 	}
 	if (p != begin) {
 		if (p - begin < MIN_FEATURE_LINE_LEN || p - begin > MAX_FEATURE_LINE_LEN ) 
-			return;
+			return 0;
 		memset(line, 0x0, sizeof(line));
 		strncpy(line, begin, p - begin);
 		af_init_feature(line);
@@ -341,6 +341,7 @@ void load_feature_config(void)
 	}
 	if (feature_buf)
 		kfree(feature_buf);
+	return 0;
 }
 
 static void af_clean_feature_list(void)
@@ -654,7 +655,6 @@ int af_match_one(flow_info_t *flow, af_feature_node_t *node)
 	if (flow->l4_len == 0)
 		return AF_FALSE;
 
-	// 匹配端口
 	if (node->sport != 0 && flow->sport != node->sport ){
 		return AF_FALSE;
 	}
@@ -687,16 +687,15 @@ int app_filter_match(flow_info_t *flow)
 		list_for_each_entry_safe(node, n, &af_feature_head, head) {
 			if(af_match_one(flow, node)) 
 			{
+				AF_DEBUG("appid = %d\n", node->app_id);
 				flow->app_id = node->app_id;
-				client = find_af_client_by_ip(flow->src);
-				if (!client){
-					goto EXIT;
+				if (is_user_match_enable()){
+					client = find_af_client_by_ip(flow->src);
+					if (!client || !find_af_mac(client->mac)){
+						goto EXIT;
+					}
 				}
-				// 如果开启了基于用户的过滤，但没有匹配到用户
-				if (is_user_match_enable() && !find_af_mac(client->mac)){
-					AF_ERROR("not match mac:"MAC_FMT"\n", MAC_ARRAY(client->mac));
-					goto EXIT;
-				}
+		
 				if (af_get_app_status(node->app_id)){
 					flow->drop = AF_TRUE;
 					feature_list_read_unlock();
@@ -780,9 +779,6 @@ void af_update_client_app_info(flow_info_t *flow)
 	}
 	AF_CLIENT_UNLOCK_W();
 }
-
-/* 在netfilter框架注册的钩子 */
-
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,4,0)
 static u_int32_t app_filter_hook(void *priv,
@@ -941,19 +937,19 @@ void fini_port_timer(void)
 }
 
 
-/*
-	模块初始化
-*/
 static int __init app_filter_init(void)
 {
 	AF_INFO("appfilter version:"AF_VERSION"\n");
+	if (0 != load_feature_config()){
+		printk("load feature failed\n");
+		return -1;
+	}
 	af_log_init();
 	af_register_dev();
 	af_mac_list_init();
 	af_init_app_status();
-	load_feature_config();
+
 	init_af_client_procfs();
-//	show_feature_list();
 	af_client_init();
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,13,0)
     nf_register_net_hooks(&init_net, app_filter_ops, ARRAY_SIZE(app_filter_ops));
@@ -961,14 +957,10 @@ static int __init app_filter_init(void)
 	nf_register_hooks(app_filter_ops, ARRAY_SIZE(app_filter_ops));
 #endif
 	init_oaf_timer();
-
 	AF_INFO("init app filter ........ok\n");
 	return 0;
 }
 
-/*
-	模块退出
-*/
 static void app_filter_fini(void)
 {
 	AF_INFO("app filter module exit\n");
